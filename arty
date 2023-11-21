@@ -77,8 +77,15 @@ def main():
         repositories = [repo for repo in artifactory.repositories.list() if repo.type == "LOCAL"]
 
     for repo in repositories:
-        print(repo.key)
-        path_digger(repo.key, args.artifact)
+        if args.list:
+            if args.repo:
+                print(repo.key)
+                path_digger(repo.key, args.artifact)
+            else:
+                print(repo.key)
+        else:
+            print(repo.key)
+            path_digger(repo.key, args.artifact)
         
 
 class artifact_info:
