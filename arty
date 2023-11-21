@@ -1,0 +1,169 @@
+#!/usr/bin/python3
+# -*- coding: utf-8 -*-
+
+import argparse
+import configparser
+import datetime
+from pyartifactory import Artifactory
+import signal
+import sys
+
+parser = argparse.ArgumentParser()
+parser.add_argument("-r", "--repo", help="Repository name, ie: docker-local")
+parser.add_argument("-a", "--artifact", help="Artifact name", default = "")
+parser.add_argument("-l", "--list", help="List only mode (no additional info, just repo or artifact name)", action="store_true", default=False)
+parser.add_argument("-d", "--delete", help="CAREFUL! Delete the repository or artifact exactly matching `--repo` and optionally `--artifact`.", action="store_true", default=False)
+parser.add_argument("-c", "--clean-up", help="Export all stale artifacts into a CSV file.", action="store_true", default=False)
+parser.add_argument("-s", "--stale-days", help="How many days after of which an artifact is 'old', defaults to 365.", default=365)
+parser.add_argument("--configure", help="Configure this script", action="store_true", default=False)
+
+args = parser.parse_args()
+
+config = configparser.ConfigParser()
+
+if args.configure:
+    with open('.arty.conf', 'w') as configfile:
+        af_user = input("Artifactory username? ")
+        af_pass = input("Artifactory password or API key? ")
+        artifact_url = input("Artifactory URL (eg: artifactory.example.com)? ")
+        config['DEFAULT'] = {'username': af_user,
+                            'password': af_pass,
+                            'url': artifact_url}
+        config.write(configfile)
+
+        print("Script configured!")
+
+try:
+    config.read('.arty.conf')
+    af_user = config['DEFAULT']['username']
+    af_pass = config['DEFAULT']['password']
+    artifact_url = config['DEFAULT']['url']
+except:
+    print("This script requires an artifactory username and password (or API key) with enough privileges to work with repositories and artifacts, and the artifactory server URL.\n")
+    print("Run the script with the --config argument to configure it.")
+    sys.exit(255)
+
+try:
+    artifactory = Artifactory(url="https://" + artifact_url, auth=(af_user, af_pass))
+except:
+    print("Error while connecting to artifactory, please double-check username, password/API key and URL into the config file `.arty.conf` (or run the script with --configure again).")
+    exit(255)
+
+try:
+    artifactory.users.get(af_user)
+except:
+    print("Error: Artifactory server unreachable, please double-check the URL")
+    exit(255)
+
+def main():
+
+    signal.signal(signal.SIGINT, signal_handler)
+
+    if args.delete:
+        try:
+            if args.artifact:
+                path = args.artifact + "/" + args.repo
+                # Delete artifact: artifactory.artifacts.delete(path)
+            else:
+                path = args.artifact
+                # Delete repo: artifactory.repositories.delete(path)
+            print(path + " DELETED")
+        except:
+            print("Repo/artifact not found.")
+
+    if args.repo:
+        repositories = [artifactory.repositories.get_repo(args.repo)]
+    else:
+        repositories = [repo for repo in artifactory.repositories.list() if repo.type == "LOCAL"]
+
+    for repo in repositories:
+        print(repo.key)
+        path_digger(repo.key, args.artifact)
+        
+
+class artifact_info:
+    def __init__(self, artifact_path):
+        info = artifactory.artifacts.info(artifact_path)
+        self.creationdate = (info.created).strftime('%Y-%m-%d %H:%M')
+        self.lastupdate = (info.lastUpdated).strftime('%Y-%m-%d %H:%M')
+        self.age = (datetime.datetime.now(datetime.timezone.utc) - info.lastUpdated).days
+        self.modifiedBy = info.modifiedBy or ""
+        self.createdBy = info.createdBy or ""
+
+class artifact_stats:
+    def __init__(self, artifact_path):
+        info = artifactory.artifacts.stats(artifact_path)
+        self.downloadCount = info.downloadCount
+        if info.downloadCount > 0:
+            lastdownload = (datetime.datetime.fromtimestamp(info.lastDownloaded / 1000.0))
+            self.lastDownloaded = lastdownload.strftime('%Y-%m-%d %H:%M')
+            self.age = (datetime.datetime.now() - lastdownload).days
+            self.lastDownloadedBy = info.lastDownloadedBy
+        else:
+            self.lastDownloaded = "NEVER"
+            self.age = 0
+            self.lastDownloadedBy = ""
+
+def path_digger(repo_name, artifact):
+
+    repo_info = artifactory.artifacts.info(repo_name)
+
+    indent = len(repo_name.split("/")) + 1
+    
+    # children, if present, holds a list of all the repo "subfolders", each "child" is including the URI and a bool "folder" set to True, 
+    # in which case the child might have children too. Note that the last time this loop will run, we'll find the artifact files inside the
+    # repo, that is, the hasattr will evaluate to True being the parent folder of such files.
+
+    if hasattr(repo_info, 'children'):
+        # The artifact might be an empty folder
+        if len(repo_info.children) > 0:
+
+            if artifact:
+                children = [ child for child in repo_info.children if child.uri == "/" + artifact ]
+            else:
+                children = repo_info.children
+
+            for child in children:
+                if child.folder == True:
+                    if args.list == True:
+                        print(" " * indent + child.uri)
+                    else:
+                        info = artifact_info(repo_name + child.uri)
+                        if info.createdBy != "":
+                            output = " " * indent + child.uri + " - Last update by " + info.modifiedBy + " on " + info.lastupdate
+                        else:
+                            output = " " * indent + child.uri + " - Last update on " + info.lastupdate
+
+                        print(output)
+
+                    path_digger(repo_name + child.uri, "")
+                else:
+                    # Since this is not a folder, it is the file or docker layer itself, we can skip it if we're listing or check its age if we're cleaning-up
+                    if args.list == True:
+                        continue
+
+                    if 'current_repo' in locals():
+                        continue
+                    else:
+                        current_repo = repo_name
+
+                    stats = artifact_stats(repo_name + child.uri)
+                    if stats.downloadCount > 0:
+                        print(" " * indent + "└ Last artifact download on " + stats.lastDownloaded + " (" + str(stats.age) + " days old) by " + stats.lastDownloadedBy)
+                    else:
+                        print(" " * indent + "└ ZERO DOWNLOADS")
+
+                    if args.clean_up:
+                        with open('cleanup.csv', 'a') as f:
+                            if stats.downloadCount == 0:
+                                f.write(repo_name + ";NONE\n")
+                            elif stats.age > args.stale_days:
+                                f.write(repo_name + ";" + str(stats.age) + "\n")
+
+
+def signal_handler(sig, frame):
+    print('Exiting..')
+    sys.exit(0)
+
+
+if __name__ == '__main__': main()
