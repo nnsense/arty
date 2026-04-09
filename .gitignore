@@ -1,2 +1,4 @@
 *.conf
 *.csv
+venv/
+.venv/

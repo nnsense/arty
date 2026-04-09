@@ -3,18 +3,18 @@
 
 ## Configuration
 
-The script requries to be configured before it can be used, run `arty --configure` to setup your username, password (or API token), and server URL. This will create a file inside the same repo called `.arty.conf` with those detail stored, which the script will then use to connect to artifactory.
+The script reads Artifactory credentials from `.arty.conf` if that file exists, otherwise it falls back to the `ARTIFACTORY_USERNAME` and `ARTIFACTORY_APIKEY` environment variables. The Artifactory URL is passed explicitly with `--url`.
 
 ## Usage
 
-The script can list or get information about each repo/artifact. To just list, use the `-l` argument.
+The script can list or get information about each repo/artifact. To just list, use the `-l` argument. Repository listings also include the description, used space, and item count when that storage summary is available from Artifactory. When listing all repositories with `-l`, the output is formatted as a table when `prettytable` is installed.
 
 Without any argument the script will get all repos information about last update (for repos) or last download date/time (for artifacts). With `-l`, it will do the same, without any additional information.
 
-To get info (or list) specific repo, use `-p <reponame>`:
+To get info (or list) specific repo, use `-r <reponame>`:
 
 ```
-arty -r docker-local 
+arty --url https://artifactory.example.com/artifactory -r docker-local
 docker-local
   /myartifact - Last update by someuser on 2020-06-08 13:35
    /aws-alb-ingress-controller - Last update by someuser on 2020-06-08 13:35
@@ -27,7 +27,7 @@ docker-local
 To get info about a specific artifact, use `-a`:
 
 ```
-arty -r docker-local -a myartifact 
+arty --url https://artifactory.example.com/artifactory -r docker-local -a myartifact
 docker-local
   /myartifact - Last update by someuser on 2020-06-08 13:35
    /aws-alb-ingress-controller - Last update by someuser on 2020-06-08 13:35
@@ -42,7 +42,7 @@ A repo is considered "stale" if older than 365 days, the number can be set with 
 To get a CSV with all the repos/artifact older than 365 days (or any other number set with `-s`):
 
 ```
-arty -r docker-local -a myartifact -c
+arty --url https://artifactory.example.com/artifactory -e -r docker-local -a myartifact
 ```
 
 This will create a file `clean-up.csv` with a list of the repos (full path) and the number of days from the **last download date/time**.
