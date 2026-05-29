@@ -9,6 +9,7 @@ import os
 import signal
 import sys
 import time
+from urllib.parse import quote
 
 try:
     from prettytable import PrettyTable
@@ -99,6 +100,83 @@ except Exception:
     repo_storage = {}
 
 
+def artifact_delete_url(path):
+    return artifact_url.rstrip("/") + "/" + quote(path.strip("/"), safe="/")
+
+
+def delete_artifact(path):
+    response = requests.delete(
+        artifact_delete_url(path),
+        auth=(af_user, af_pass),
+    )
+
+    if response.status_code == 404:
+        return False, "Artifact not found"
+
+    try:
+        response.raise_for_status()
+    except requests.RequestException as e:
+        return False, str(e)
+
+    return True, ""
+
+
+def is_repo_root(path):
+    return "/" not in path.strip("/")
+
+
+def cleanup_empty_parents(path):
+    parent = "/".join(path.strip("/").split("/")[:-1])
+
+    while parent and not is_repo_root(parent):
+        try:
+            info = artifactory.artifacts.info(parent)
+        except Exception as e:
+            print(parent + " : Error while checking parent folder (" + str(e) + ")")
+            return
+
+        if len(getattr(info, "children", [])) != 0:
+            return
+
+        deleted, message = delete_artifact(parent)
+        if deleted:
+            print(parent + " is empty, deleted.")
+            parent = "/".join(parent.split("/")[:-1])
+            continue
+
+        print(parent + " : Error while deleting empty parent (" + message + ")")
+        return
+
+
+def delete_with_retries(path, lines_number=None):
+    result = 1
+
+    while result < 10:
+        deleted, message = delete_artifact(path)
+        suffix = ""
+        if lines_number is not None:
+            suffix = " (" + str(lines_number) + " to go)"
+
+        if deleted:
+            print(path + " : Deleted" + suffix)
+            cleanup_empty_parents(path)
+            return True
+
+        if message == "Artifact not found":
+            print(path + " : Error, Artifact not found, skipping" + suffix)
+            return False
+
+        print(path + " : Error (" + str(result) + ") " + message)
+        result += 1
+        time.sleep(1)
+
+    if lines_number is not None:
+        print("Can't delete, skipping. (" + str(lines_number) + " to go).")
+    else:
+        print(path + " : Can't delete, skipping.")
+    return False
+
+
 def main():
 
     signal.signal(signal.SIGINT, signal_handler)
@@ -122,36 +200,8 @@ def main():
                 # the first semicolon-separated column written by `--export`.
                 path = line.rstrip().split(";", 1)[0]
 
-                result = 1
                 lines_number -= 1
-
-                while result < 10:
-                    try:
-                        artifactory.artifacts.delete(path)
-                    except Exception as e:
-                        response = getattr(e, "response", None)
-                        if response is not None and response.reason == "Not Found":
-                            print(path + " : Error, Artifact not found, skipping (" + str(lines_number) + " to go)")
-                            break
-                        else:
-                            print(path + " : Error (" + str(result) + ") " + str(e))
-                            result += 1
-                            time.sleep(1)
-                    else:
-                        print(path + " : Deleted (" + str(lines_number) + " to go)")
-                        break
-                else:
-                    print("Can't delete, skipping. (" + str(lines_number) + " to go).")
-
-                # Check if the parent folder is empty
-                parent = "/".join(path.split('/')[:-1])
-                if not parent:
-                    continue
-                artifact_info = artifactory.artifacts.info(parent)
-                # NOT so sure about this, I didn't actually checked that EVERY empty folder isn't maybe some root or something that would delete half repo..
-                if len(artifact_info.children) == 0:
-                    print(parent + " is empty, deleting..")
-                    # artifactory.artifacts.delete(parent)
+                delete_with_retries(path, lines_number)
         sys.exit(0)
 
     if args.repo:
@@ -215,6 +265,11 @@ def print_repo_table(repositories):
     print(table)
 
 
+def repo_used_space(artifact_path):
+    repo_key = artifact_path.strip("/").split("/", 1)[0]
+    return repo_storage.get(repo_key, {}).get('usedSpace', "")
+
+
 def print_artifact_status(repo_name, file_child, indent):
     current_repo = repo_name
 
@@ -239,12 +294,21 @@ def print_artifact_status(repo_name, file_child, indent):
 
     # Since we only care to write artifacts on cleanup CSV file we write to CSV file here without the child.uri
     if args.export:
+        used_space = repo_used_space(current_repo)
         with open(args.filename, 'a') as f:
             if stats.downloadCount == 0:
-                f.write(current_repo + ";NONE\n")
+                f.write(current_repo + ";NONE;" + used_space + "\n")
             elif stats.age > args.stale_days:
                 info = artifact_info(current_repo + file_child.uri)
-                f.write(current_repo + ";" + str(stats.age) + ";" + stats.lastDownloaded + ";" + info.creationdate + "\n")
+                f.write(current_repo + ";" + str(stats.age) + ";" + stats.lastDownloaded + ";" + info.creationdate + ";" + used_space + "\n")
+
+    if args.cleanup:
+        if is_repo_root(current_repo):
+            print(" " * indent + "└ SKIP DELETE: refusing to delete repository root")
+        elif stats.downloadCount == 0:
+            delete_with_retries(current_repo)
+        elif stats.age > args.stale_days:
+            delete_with_retries(current_repo)
 
 
 class artifact_info:

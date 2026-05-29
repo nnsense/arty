@@ -45,4 +45,11 @@ To get a CSV with all the repos/artifact older than 365 days (or any other numbe
 arty --url https://artifactory.example.com/artifactory -e -r docker-local -a myartifact
 ```
 
-This will create a file `clean-up.csv` with a list of the repos (full path) and the number of days from the **last download date/time**.
+This will create a file `clean-up.csv` with a list of the repos (full path), the number of days from the **last download date/time**, and the repository used space when Artifactory exposes it through the storage summary API.
+
+CSV rows use one of these formats:
+
+```
+path;NONE;repo used space
+path;age;last download;created;repo used space
+```
